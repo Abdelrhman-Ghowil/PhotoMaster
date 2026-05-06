@@ -5,7 +5,7 @@ numpy
 typing
 scikit-image
 huggingface_hub
-transformers>=4.39.1
+transformers>=4.39.1,<5
 streamlit
 openpyxl
 pdf2image
