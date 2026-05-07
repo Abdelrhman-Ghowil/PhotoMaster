@@ -135,6 +135,14 @@ def download_all_images_as_zip(images_info, remove_bg=False, add_bg=False, bg_im
                 if add_bg and bg_image:
                     processed_image, dimensions = combine_with_background(processed_image, bg_image, resize_foreground=resize_foreground)
                     ext = 'png'
+                
+                # Apply flipping based on user selection
+                if flip_horizontal or flip_vertical:
+                    image = Image.open(BytesIO(image_content))
+                    processed_image = flip_image(image, flip_horizontal, flip_vertical)
+                    img_byte_arr = BytesIO()
+                    processed_image.save(img_byte_arr, format='PNG')
+                    processed_image = img_byte_arr.getvalue()
 
                 if processed_image:
                     zf.writestr(f"{name.rsplit('.', 1)[0]}.{ext}", processed_image)
@@ -178,6 +186,65 @@ def rename_images_based_on_sheet(file_path, output_dir):
                 os.rename(old_image_path, new_image_path)
                 print(f"Renamed {old_image_path} to {new_image_path}")
 
+#-------------------------- Convert PDF to images-----------------------------
+@st.cache_data
+def convert_pdf_to_images(pdf_content):
+    try:
+        images = convert_from_bytes(pdf_content)
+        return images
+    except Exception as e:
+        st.error(f"Error converting PDF to images: {e}")
+        return []
+#-------------------------- Convert PDF to images-----------------------------
+                
+def flip_image(image, flip_horizontal=False, flip_vertical=False):
+    if flip_horizontal:
+        image = ImageOps.mirror(image)
+    if flip_vertical:
+        image = ImageOps.flip(image)
+    return image
+#---------------------extract links from hypridlink--------------------------------
+import openpyxl
+
+def extract_links(uploaded_file, links_column='links'):
+    # Ensure the file is an Excel file
+    if uploaded_file.name.endswith('.xlsx'):
+        # Load workbook using openpyxl
+        workbook = openpyxl.load_workbook(uploaded_file, data_only=True)
+        extracted_links = []
+
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            
+            # Find the index of the 'links' column (assuming first row contains headers)
+            headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
+            if links_column not in headers:
+                continue  # Skip this sheet if the 'links' column is not found
+            
+            links_col_idx = headers.index(links_column) + 1  # openpyxl uses 1-based index for columns
+            
+            # Iterate over the rows, starting from the second row (skipping the header)
+            for row in sheet.iter_rows(min_row=2):
+                link_cell = row[links_col_idx - 1]  # Get the cell for the 'links' column
+
+                # Check if the cell contains a hyperlink using openpyxl
+                if link_cell.hyperlink:
+                    extracted_link = link_cell.hyperlink.target  # Extract the hyperlink URL
+                else:
+                    extracted_link = link_cell.value  # Use the plain value in the cell if no hyperlink
+
+                # Append the link (either hyperlink target or plain value)
+                if extracted_link:
+                    extracted_links.append(extracted_link)
+
+        return extracted_links
+    else:
+        raise ValueError("The uploaded file is not an Excel file.")
+
+
+#-----------------------------extract links from hypridlink------------------------
+
+
 # Streamlit app
 st.set_page_config(page_title="PhotoMaster", page_icon="🖼️")
 st.title("🖼️ PhotoMaster")
@@ -187,17 +254,23 @@ col1, col2 = st.columns([2, 1])
 threshold = 2.0
 
 with col1:
-    uploaded_files = st.file_uploader("", type=["xlsx", "csv", "jpg", "jpeg", "png", "jfif", "avif", "webp", "heic","NEF", "pdf"], accept_multiple_files=True)
+    
+    # Specify the file types you want to accept
+    uploaded_files = st.file_uploader("", type=["xlsx", "csv", "jpg", "jpeg", "png", "jfif", "avif", "webp", "heic","NEF","ARW","tiff", "pdf"], accept_multiple_files=True)
+
+    # Input field for Google Drive folder link
+    folder_link = st.text_input("Enter Google Drive Link for (**Larger Files**)")
+
 with col2:
     st.markdown("")
     remove_bg = st.checkbox("Remove background")
     add_bg = st.checkbox("Add background")
     resize_fg = st.checkbox("Resize")
     if resize_fg:
-        udvanced = st.checkbox("Advanced Resize Options")
+        udvanced = st.checkbox("💎Advanced Resize Options")
         if udvanced:
             threshold = st.slider("Aspect Ratio Threshold", 1.0, 2.5, 1.5)
-    st.checkbox("Compress and Convert Format")
+    st.checkbox("👊Compress and Convert Format")
     st.button("Submit")
 
 images_info = []
@@ -221,6 +294,7 @@ if  uploaded_files:
             uploaded_file = uploaded_files[0]
             if uploaded_file.name.endswith('.xlsx'):
                 xl = pd.ExcelFile(uploaded_file)
+                
                 for sheet_name in xl.sheet_names:
                     st.write(f"Processing sheet: {sheet_name}")  # Debugging print
                     df = xl.parse(sheet_name)
@@ -229,7 +303,13 @@ if  uploaded_files:
                         name_count = defaultdict(int)
                         empty_count = 0
                         unique_images_info = []
-                        for name, link in zip(df['name'], df['links']):
+
+                        #----function extract links from hyprid links in excel
+                        links = extract_links(uploaded_file, links_column='links')
+                        #-----------------------------------------------------------
+                        #for name, link in zip(df['name'], df['links']):
+
+                        for name, link in zip(df['name'], links):
                             if pd.isna(name) or name.strip() == "":
                                 empty_name = f"empty_{empty_count}" if empty_count > 0 else "empty"
                                 name = empty_name
@@ -240,6 +320,7 @@ if  uploaded_files:
                                 unique_name = name
                             unique_images_info.append((unique_name, link))
                             name_count[name] += 1
+                        
                         images_info.extend(unique_images_info)
                         if empty_count > 0:
                             st.warning(f"Number of empty cells in 'name' column: {empty_count}")
@@ -317,16 +398,23 @@ if images_info:
         bg_file = st.file_uploader("Upload background image", type=["jpg", "jpeg", "png"])
         if bg_file:
             bg_image = resize_image(bg_file.read())
+        else:
+            # Use default background image if no new image is uploaded
+            with open("./Bg.png", "rb") as file:
+                default_bg_image = resize_image(file.read())
+                bg_image = default_bg_image
 
     st.markdown("## Preview")
-    if st.button("Download All Images", key="download_all"):
-        zip_buffer = download_all_images_as_zip(images_info, remove_bg=remove_bg, add_bg=add_bg, bg_image=bg_image, resize_foreground=resize_fg, threshold=threshold)
-        st.download_button(
-            label="Download All Images as ZIP",
-            data=zip_buffer,
-            file_name="all_images.zip",
-            mime="application/zip"
-        )
+    #-------------------------------Now Download All Images button @ End of page-----------------------
+    # if st.button("Download All Images", key="download_all"):
+    #     zip_buffer = download_all_images_as_zip(images_info, remove_bg=remove_bg, add_bg=add_bg, bg_image=bg_image, resize_foreground=resize_fg, threshold=threshold,flip_horizontal=False, flip_vertical=False)
+    #     st.download_button(
+    #         label="Download All Images as ZIP",
+    #         data=zip_buffer,
+    #         file_name="all_images.zip",
+    #         mime="application/zip"
+    #     )
+    #-------------------------------Now Download All Images button @ End of page-----------------------
 
     cols = st.columns(2)
     for i, (name, url_or_file) in enumerate(images_info):
@@ -352,8 +440,33 @@ if images_info:
                 if add_bg and bg_image:
                     processed_image, dimensions = combine_with_background(processed_image, bg_image, resize_foreground=resize_fg)
                     ext = 'png'
+                
+                # Flip and rename options
+                # Place flip options on the same row
+                flip_col1, flip_col2,rename_col3 = st.columns(3)
+                with flip_col1:
+                    flip_horizontal = st.checkbox("Flip H🔁", key=f"flip_horizontal_{i}")
+                with flip_col2:
+                    flip_vertical = st.checkbox("Flip V🔃", key=f"flip_vertical_{i}")
+                with rename_col3:
+                    rename_image = st.checkbox(f"Rename", key=f"rename_checkbox_{i}")
+
+                if rename_image:
+                    new_name = st.text_input(f"Enter new name for {name} (without extension):", key=f"rename_input_{i}")
+                    if new_name:
+                        name = f"{new_name}.{ext}"  # Apply the new name
+
+                # Apply flipping based on user selection
+                if flip_horizontal or flip_vertical:
+                    image = Image.open(BytesIO(processed_image))
+                    processed_image = flip_image(image, flip_horizontal, flip_vertical)
+                    img_byte_arr = BytesIO()
+                    processed_image.save(img_byte_arr, format='PNG')
+                    processed_image = img_byte_arr.getvalue()
 
                 if processed_image:
+                    # Store the processed image for downloading
+                    images_info[i]=((name, processed_image))  # Add renamed/flipped image to the list
                     st.image(processed_image, caption=name)
                     st.download_button(
                         label=f"Download {name.rsplit('.', 1)[0]}",
@@ -362,3 +475,13 @@ if images_info:
                         mime=f"image/{ext}",
                         key=f"download_{i}"  # Unique key based on index
                     )
+    #------------------------Download All Images Button-----------------------------------------
+    if st.button("Download All Images", key="download_all"):
+        zip_buffer = download_all_images_as_zip(images_info, remove_bg=remove_bg, add_bg=add_bg, bg_image=bg_image, resize_foreground=resize_fg, threshold=threshold,flip_horizontal=flip_horizontal, flip_vertical=flip_vertical)
+        st.download_button(
+            label="Download All Images as ZIP",
+            data=zip_buffer,
+            file_name="all_images.zip",
+            mime="application/zip"
+        )
+ 

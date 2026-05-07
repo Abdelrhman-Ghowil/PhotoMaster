@@ -1,0 +1,26 @@
+name: Deploy PhotoMaster Streamlit App
+
+on:
+  push:
+    branches:
+      - main  # Adjust if you're using a different branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Deploy to server
+      env:
+        SERVER_IP: 128.140.37.194
+        SSH_USER: shobbak
+        SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+      run: |
+        sshpass -p $SSH_PASSWORD ssh -o StrictHostKeyChecking=no $SSH_USER@$SERVER_IP "
+        cd /home/shobbak/superpower/App_v1 &&
+        git pull origin main &&
+        source venv/bin/activate &&
+        echo $SSH_PASSWORD | sudo -S systemctl restart PhMr.service"
