@@ -1,3 +1,9 @@
+import streamlit as st
+from app_entry import run_app
+
+run_app()
+st.stop()
+
 import shutil
 import zipfile
 import streamlit as st
@@ -8,6 +14,7 @@ from zipfile import ZipFile
 from PIL import Image, UnidentifiedImageError
 import re
 from transformers import pipeline
+from transformers.modeling_utils import PreTrainedModel
 from collections import defaultdict
 import pypdfium2 as pdfium
 import os
@@ -66,12 +73,27 @@ def resize_image(image_content, size=(1024, 1024), aspect_ratio_threshold=2):
     except UnidentifiedImageError:
         return None
 
+if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+    # Some remote-code models do not define this attribute, but newer
+    # transformers versions expect it during model load.
+    PreTrainedModel.all_tied_weights_keys = {}
+
+
+@st.cache_resource
+def get_rmbg_pipeline():
+    return pipeline(
+        "image-segmentation",
+        model="briaai/RMBG-1.4",
+        trust_remote_code=True,
+        model_kwargs={"low_cpu_mem_usage": False},
+    )
+
+
 @st.cache_data
 def remove_background(image_content):
     try:
         image = Image.open(BytesIO(image_content))
-        pipe = pipeline("image-segmentation", model="briaai/RMBG-1.4", trust_remote_code=True)
-        output_img = pipe(image)
+        output_img = get_rmbg_pipeline()(image)
         img_byte_arr = BytesIO()
         output_img.save(img_byte_arr, format='PNG')
         return img_byte_arr.getvalue()
