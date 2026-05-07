@@ -11,33 +11,6 @@ from transformers import pipeline
 from collections import defaultdict
 import pypdfium2 as pdfium
 import os
-from bs4 import BeautifulSoup
-from PIL import ImageOps  # Import ImageOps for flipping
-from pdf2image import convert_from_bytes # import pdf2image for convert pdf
-import openpyxl #for extract links from hypridlink
-
-#--------------------------------------Api Google-------------------------------------
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-
-# Function to authenticate Google Drive
-@st.cache_data
-def authenticate_gdrive():
-    credentials = service_account.Credentials.from_service_account_file('credentials.json')
-    return build('drive', 'v3', credentials=credentials)
-
-# Function to get list of files (images and PDFs) from Google Drive folder
-def get_files_from_folder(folder_id, service):
-    results = service.files().list(
-        q=f"'{folder_id}' in parents and (mimeType contains 'image/' or mimeType contains 'application/pdf')",
-        pageSize=1000, fields="files(id, name, mimeType)").execute()
-    return results.get('files', [])
-
-# Convert Google Drive file ID to direct download link
-def convert_drive_file(file_id):
-    return f"https://drive.google.com/uc?export=download&id={file_id}"
-
-#--------------------------------------Api Google-------------------------------------
 
 @st.cache_data
 def convert_drive_link(link):
@@ -52,39 +25,16 @@ def convert_drive_link(link):
     if match_id:
         file_id = match_id.group(1) if match_id.group(1) else match_id.group(2)
         return f"https://drive.google.com/uc?export=download&id={file_id}"
-
-    # Extract image ID from the Postimg URL
-    match_postimg = re.search(r'postimg.cc/([^/]+)', link)
-    if match_postimg:
-        image_id = match_postimg.group(1)
-        return f"https://i.postimg.cc/{image_id}/your-image-name.jpg"  # Update based on the actual image format
     
-    # If the link is from imgg.io, scrape the actual image URL
-    if "imgg.io" or "ibb.co" in link:
-        try:
-            response = requests.get(link)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                # Find the anchor tag with the specified class
-                img_tag = soup.find('a', {'class': 'btn btn-download default'})
-                if img_tag and 'href' in img_tag.attrs:
-                    return img_tag['href']  # Get the URL from the href attribute
-            else:
-                st.error(f"Failed to access the page. Status code: {response.status_code}")
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
-            
     # Return the original link if no patterns matched
     return link
 
 @st.cache_data
-def download_image(url):    
+def download_image(url):
     response = requests.get(url)
     if response.status_code == 200:
         return response.content
-    else:
-        st.error(f"Failed to download image. Status code: {response.status_code}")
-        return None
+    return None
 
 @st.cache_data
 def resize_image(image_content, size=(1024, 1024), aspect_ratio_threshold=2):
@@ -161,7 +111,7 @@ def combine_with_background(foreground_content, background_content, resize_foreg
         return None, None
 
 @st.cache_data
-def download_all_images_as_zip(images_info, remove_bg=False, add_bg=False, bg_image=None, resize_foreground=False, threshold=2,flip_horizontal=False, flip_vertical=False):
+def download_all_images_as_zip(images_info, remove_bg=False, add_bg=False, bg_image=None, resize_foreground=False, threshold=2):
     zip_buffer = BytesIO()
     with ZipFile(zip_buffer, 'w') as zf:
         for name, url_or_file in images_info:
@@ -313,9 +263,9 @@ with col1:
 
 with col2:
     st.markdown("")
-    remove_bg = st.checkbox("📷Remove background")
-    add_bg = st.checkbox("📜Add background")
-    resize_fg = st.checkbox("🔛Resize")
+    remove_bg = st.checkbox("Remove background")
+    add_bg = st.checkbox("Add background")
+    resize_fg = st.checkbox("Resize")
     if resize_fg:
         udvanced = st.checkbox("💎Advanced Resize Options")
         if udvanced:
@@ -429,7 +379,7 @@ if  uploaded_files:
         elif any(file.type == 'application/pdf' for file in uploaded_files):  
             images_info = []
             # Loop through each uploaded PDF
-            for uploaded_file in uploaded_files:
+            for uploaded_file in uploaded_files: 
                 pdf = pdfium.PdfDocument(uploaded_file)
                 fn = uploaded_file.name
                 for i in range(len(pdf)):
@@ -442,47 +392,6 @@ if  uploaded_files:
                     elif i > 0:
                         images_info.append((f"{fn.rsplit('.', 1)[0]}_page_{i + 1}.jpg", img_byte_arr.getvalue()))
 
-
-#-------------------------------folder Drive--------------------------------------------
-# Process files from Google Drive folder
-if folder_link:
-    folder_id_match = re.search(r'/folders/([a-zA-Z0-9_-]+)', folder_link)
-    if folder_id_match:
-        folder_id = folder_id_match.group(1)
-        
-        # Step 3: Authenticate and get files from folder
-        service = authenticate_gdrive()
-        files = get_files_from_folder(folder_id, service)
-        
-        if files:
-            st.write(f"Found {len(files)} files in the folder.")
-            for file in files:
-                file_id = file['id']
-                file_name = file['name']
-                mime_type = file['mimeType']
-
-                # If file is an image
-                if mime_type.startswith('image/'):
-                    image_url = convert_drive_file(file_id)
-                    image_content = download_image(image_url)
-                    if image_content:
-                        images_info.append((file_name, image_content))
-
-                # If file is a PDF
-                elif mime_type == 'application/pdf':
-                    pdf_url = convert_drive_file(file_id)
-                    pdf_content = download_image(pdf_url)
-                    if pdf_content:
-                        pdf_images = convert_pdf_to_images(pdf_content)
-                        for i, img in enumerate(pdf_images):
-                            img_byte_arr = BytesIO()
-                            img.save(img_byte_arr, format='PNG')
-                            images_info.append((f"{file_name.rsplit('.', 1)[0]}.png", img_byte_arr.getvalue()))
-
-#-------------------------------folder Drive--------------------------------------------
-
-
-# Process and display images
 if images_info:
     bg_image = None
     if add_bg:
