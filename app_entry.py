@@ -4,10 +4,28 @@ import shutil
 from collections import defaultdict
 from io import BytesIO
 
+# Silence TensorFlow/oneDNN startup warnings when using transformers with PyTorch.
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
 import pandas as pd
 import pypdfium2 as pdfium
 import streamlit as st
+import streamlit.elements.image as st_image
+from streamlit.elements.lib.image_utils import image_to_url
+from streamlit.elements.lib.layout_utils import create_layout_config
 from PIL import Image
+
+
+if not hasattr(st_image, "image_to_url"):
+    def _canvas_image_to_url(image, width, clamp, channels, output_format, image_id):
+        layout_config = create_layout_config(width=width, allow_content_width=True)
+        return image_to_url(image, layout_config, clamp, channels, output_format, image_id)
+
+    st_image.image_to_url = _canvas_image_to_url
+
+from streamlit_drawable_canvas import st_canvas
 
 from services.excel_service import extract_links, rename_images_based_on_sheet
 from services.google_drive_service import authenticate_gdrive, convert_drive_file, get_files_from_folder
@@ -16,8 +34,10 @@ from services.image_service import (
     convert_and_compress_image,
     convert_drive_link,
     convert_pdf_to_images,
+    crop_image,
     download_all_images_as_zip,
     download_image,
+    erase_object,
     fit_image_to_canvas,
     flip_image,
     move_image,
@@ -41,6 +61,13 @@ ADVANCED_OPTION_PREFIXES = (
     "adv_resize_custom_size_",
     "adv_resize_width_",
     "adv_resize_height_",
+    "crop_enabled_",
+    "crop_left_",
+    "crop_right_",
+    "crop_top_",
+    "crop_bottom_",
+    "object_erase_",
+    "object_erase_brush_",
 )
 
 
@@ -59,6 +86,88 @@ def _reset_advanced_options_for_index(index):
         key = f"{prefix}{index}"
         if key in st.session_state:
             del st.session_state[key]
+    erased_key = f"object_erased_image_{index}"
+    if erased_key in st.session_state:
+        del st.session_state[erased_key]
+
+
+def _build_object_eraser_mask(canvas_image_data, background_image):
+    if canvas_image_data is None:
+        return None
+
+    canvas_image = Image.fromarray(canvas_image_data.astype("uint8"), "RGBA").convert("RGB")
+    background = background_image.convert("RGB")
+    if canvas_image.size != background.size:
+        background = background.resize(canvas_image.size, Image.LANCZOS)
+
+    canvas_pixels = canvas_image.load()
+    background_pixels = background.load()
+    mask = Image.new("L", canvas_image.size, 0)
+    mask_pixels = mask.load()
+
+    has_strokes = False
+    for y in range(canvas_image.height):
+        for x in range(canvas_image.width):
+            cr, cg, cb = canvas_pixels[x, y]
+            br, bg, bb = background_pixels[x, y]
+            diff = abs(cr - br) + abs(cg - bg) + abs(cb - bb)
+            if diff > 60 and cr > 180 and cb > 180 and cg < 140:
+                mask_pixels[x, y] = 255
+                has_strokes = True
+
+    return mask if has_strokes else None
+
+
+def _render_object_eraser(image_content, index, name):
+    original = Image.open(BytesIO(image_content)).convert("RGB")
+    max_canvas_width = 360
+    max_canvas_height = 420
+    scale = min(
+        1.0,
+        max_canvas_width / original.width,
+        max_canvas_height / original.height,
+    )
+    canvas_width = max(1, int(original.width * scale))
+    canvas_height = max(1, int(original.height * scale))
+    canvas_background = original.resize((canvas_width, canvas_height), Image.LANCZOS)
+
+    brush_size = st.slider(
+        "Brush size",
+        min_value=5,
+        max_value=120,
+        value=35,
+        step=5,
+        key=f"object_erase_brush_{index}",
+    )
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 0, 255, 0.35)",
+        stroke_width=brush_size,
+        stroke_color="#FF00FF",
+        background_image=canvas_background,
+        update_streamlit=True,
+        height=canvas_height,
+        width=canvas_width,
+        drawing_mode="freedraw",
+        display_toolbar=True,
+        key=f"object_erase_canvas_{index}",
+    )
+
+    if not st.button("Apply Object Eraser", key=f"object_erase_apply_{index}"):
+        return None
+
+    mask = _build_object_eraser_mask(canvas_result.image_data, canvas_background)
+    if mask is None:
+        st.warning(f"Brush over the object in {name}, then apply Object Eraser.")
+        return None
+
+    if mask.size != original.size:
+        mask = mask.resize(original.size, Image.NEAREST)
+
+    with st.spinner(f"Erasing object in {name}..."):
+        erased_image = erase_object(image_content, mask)
+    if erased_image:
+        st.session_state[f"object_erased_image_{index}"] = erased_image
+    return erased_image
 
 
 def run_app():
@@ -108,6 +217,7 @@ def run_app():
     global_zoom_value = 1.0
     disable_auto_resize = False
     compress_convert_enabled = False
+    object_erase_enabled = False
     output_format = "png"
     output_quality = 90
 
@@ -348,6 +458,12 @@ def run_app():
                     per_image_add_bg = False
                     custom_zoom_enabled = False
                     custom_zoom_value = 1.0
+                    crop_enabled = False
+                    crop_left = 0
+                    crop_right = 0
+                    crop_top = 0
+                    crop_bottom = 0
+                    per_image_object_erase = False
                     move_enabled = False
                     move_x = 0
                     move_y = 0
@@ -358,7 +474,7 @@ def run_app():
                     if st.button("Reset", key=f"reset_adv_{i}"):
                         _reset_advanced_options_for_index(i)
                         st.rerun()
-                    with st.expander("Avanced Options", expanded=False):
+                    with st.expander("Avanced Options (Per Image)", expanded=False):
                         per_image_add_bg = st.checkbox(
                             "Add BG",
                             key=f"per_add_bg_{i}",
@@ -382,6 +498,16 @@ def run_app():
                                 key=f"zoom_value_{i}",
                                 label_visibility="collapsed",
                             )
+                        crop_enabled = st.checkbox("Crop Tool", key=f"crop_enabled_{i}")
+                        if crop_enabled:
+                            crop_left = st.slider("Crop Left %", 0, 45, 0, 1, key=f"crop_left_{i}")
+                            crop_right = st.slider("Crop Right %", 0, 45, 0, 1, key=f"crop_right_{i}")
+                            crop_top = st.slider("Crop Top %", 0, 45, 0, 1, key=f"crop_top_{i}")
+                            crop_bottom = st.slider("Crop Bottom %", 0, 45, 0, 1, key=f"crop_bottom_{i}")
+                        per_image_object_erase = st.checkbox(
+                            "Object Eraser",
+                            key=f"object_erase_{i}",
+                        )
                         move_enabled = st.checkbox("Move", key=f"move_enabled_{i}")
                         if move_enabled:
                             move_x = st.slider(
@@ -443,6 +569,16 @@ def run_app():
                         if new_name and new_name.strip():
                             renamed_base = new_name.strip()
 
+                    effective_object_erase = object_erase_enabled or per_image_object_erase
+                    erased_image_key = f"object_erased_image_{i}"
+                    if effective_object_erase:
+                        st.caption("Brush the object area, then apply the eraser.")
+                        erased_image = _render_object_eraser(image_content, i, name)
+                        if erased_image:
+                            image_content = erased_image
+                        elif erased_image_key in st.session_state:
+                            image_content = st.session_state[erased_image_key]
+
                     effective_remove_bg = remove_bg or per_image_remove_bg
                     if effective_remove_bg:
                         processed_image = remove_background(image_content)
@@ -485,6 +621,20 @@ def run_app():
                         processed_image, _ = combine_with_background(
                             processed_image, bg_image, resize_foreground=resize_fg
                         )
+                        ext = "png"
+
+                    if crop_enabled and (crop_left or crop_right or crop_top or crop_bottom):
+                        image = Image.open(BytesIO(processed_image))
+                        processed_image = crop_image(
+                            image,
+                            left_pct=crop_left,
+                            right_pct=crop_right,
+                            top_pct=crop_top,
+                            bottom_pct=crop_bottom,
+                        )
+                        img_byte_arr = BytesIO()
+                        processed_image.save(img_byte_arr, format="PNG")
+                        processed_image = img_byte_arr.getvalue()
                         ext = "png"
 
                     if flip_horizontal or flip_vertical:
