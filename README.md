@@ -10,6 +10,7 @@ A powerful image processing web app built with Python and Streamlit. PhotoMaster
 
 - **Multi-source input** — Upload images directly, or provide an Excel/CSV file with image URLs, embedded images, or a Google Drive folder link
 - **Background removal** — AI-powered removal using the `briaai/RMBG-1.4` model via Hugging Face
+- **Object eraser** — Brush over unwanted objects and inpaint them with a TorchScript Big LaMa model
 - **Custom background** — Composite processed images onto any background (with optional foreground scaling)
 - **Smart resizing** — Auto-resizes to 1024×1024 (or 1290×789 for banners), with configurable aspect-ratio cropping
 - **PDF to image** — Converts each PDF page to a JPEG automatically
@@ -28,6 +29,7 @@ A powerful image processing web app built with Python and Streamlit. PhotoMaster
 | UI | [Streamlit](https://streamlit.io) |
 | Image processing | [Pillow](https://python-pillow.org), [pypdfium2](https://github.com/pypdfium2-team/pypdfium2), [pdf2image](https://github.com/Belval/pdf2image) |
 | AI background removal | [Hugging Face Transformers](https://huggingface.co) · `briaai/RMBG-1.4` |
+| AI object eraser | TorchScript Big LaMa model, inspired by [`aryadytm/remove-photo-object`](https://huggingface.co/spaces/aryadytm/remove-photo-object/tree/main) |
 | Data handling | [pandas](https://pandas.pydata.org), [openpyxl](https://openpyxl.readthedocs.io) |
 | Google Drive API | [google-api-python-client](https://github.com/googleapis/google-api-python-client) |
 | Web scraping | [BeautifulSoup4](https://beautiful-soup-4.readthedocs.io) |
@@ -74,7 +76,21 @@ To use the Google Drive folder feature, you need a service account:
 
 > ⚠️ **Never commit `credentials.json` to version control.** It is already listed in `.gitignore`.
 
----
+## 🧽 Object Eraser Setup
+
+Object Eraser looks for the TorchScript model at:
+
+```bash
+assets/big-lama.pt
+```
+
+If the file is missing, the app tries to download it automatically. You can also set a custom path:
+
+```bash
+OBJECT_ERASER_MODEL_PATH=/home/shobbak/superpower/App_v1/assets/big-lama.pt
+```
+
+In the app, enable Object Eraser, brush over the object with the magenta brush, then click **Apply Object Eraser**.
 
 ## 📋 Excel File Format
 

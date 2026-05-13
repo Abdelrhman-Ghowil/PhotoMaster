@@ -3,7 +3,14 @@ name: Deploy PhotoMaster Streamlit App
 on:
   push:
     branches:
-      - main  # Adjust if you're using a different branch
+      - main
+      - ninja-updates
+  workflow_dispatch:
+    inputs:
+      deploy_branch:
+        description: "Branch to deploy (defaults to the branch that triggered this run)"
+        required: false
+        type: string
 
 jobs:
   deploy:
@@ -11,7 +18,20 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
+
+    - name: Resolve deploy branch
+      run: |
+        if [ -n "${{ github.event.inputs.deploy_branch }}" ]; then
+          echo "DEPLOY_BRANCH=${{ github.event.inputs.deploy_branch }}" >> "$GITHUB_ENV"
+        else
+          echo "DEPLOY_BRANCH=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+        fi
+
+    - name: Install sshpass
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y sshpass
 
     - name: Deploy to server
       env:
@@ -19,8 +39,10 @@ jobs:
         SSH_USER: shobbak
         SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
       run: |
-        sshpass -p $SSH_PASSWORD ssh -o StrictHostKeyChecking=no $SSH_USER@$SERVER_IP "
+        sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "
         cd /home/shobbak/superpower/App_v1 &&
-        git pull origin main &&
+        git fetch origin &&
+        git checkout \"$DEPLOY_BRANCH\" &&
+        git pull origin \"$DEPLOY_BRANCH\" &&
         source venv/bin/activate &&
-        echo $SSH_PASSWORD | sudo -S systemctl restart PhMr.service"
+        echo \"$SSH_PASSWORD\" | sudo -S systemctl restart PhMr.service"
