@@ -2,11 +2,11 @@ torch
 torchvision
 pillow
 numpy
+typing
 scikit-image
 huggingface_hub
 transformers>=4.39.1,<5
 streamlit
-streamlit-drawable-canvas
 openpyxl
 pdf2image
 pypdfium2
