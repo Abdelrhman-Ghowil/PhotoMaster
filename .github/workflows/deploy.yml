@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - ninja-updates
   workflow_dispatch:
     inputs:
       deploy_branch:
@@ -43,6 +42,7 @@ jobs:
         cd /home/shobbak/superpower/App_v1 &&
         git fetch origin &&
         git checkout \"$DEPLOY_BRANCH\" &&
+        if [ -f .gitignore ] && ! git ls-files --error-unmatch .gitignore >/dev/null 2>&1; then rm -f .gitignore; fi &&
         git pull origin \"$DEPLOY_BRANCH\" &&
         source venv/bin/activate &&
         echo \"$SSH_PASSWORD\" | sudo -S systemctl restart PhMr.service"
