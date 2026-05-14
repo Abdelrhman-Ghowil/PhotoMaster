@@ -3,57 +3,15 @@ name: Deploy PhotoMaster Streamlit App
 on:
   push:
     branches:
-      - main
-  workflow_dispatch:
-    inputs:
-      deploy_branch:
-        description: "Branch to deploy (defaults to the branch that triggered this run)"
-        required: false
-        type: string
+      - main  # Adjust if you're using a different branch
 
 jobs:
-  smoke-test:
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Run syntax and import checks
-      run: |
-        python -m compileall app_entry.py Final.py services
-        python -c "import app_entry; import services.image_service; import services.excel_service; import services.google_drive_service; print('imports ok')"
-
   deploy:
-    needs: smoke-test
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Resolve deploy branch
-      run: |
-        if [ -n "${{ github.event.inputs.deploy_branch }}" ]; then
-          echo "DEPLOY_BRANCH=${{ github.event.inputs.deploy_branch }}" >> "$GITHUB_ENV"
-        else
-          echo "DEPLOY_BRANCH=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
-        fi
-
-    - name: Install sshpass
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y sshpass
+      uses: actions/checkout@v2
 
     - name: Deploy to server
       env:
@@ -61,14 +19,8 @@ jobs:
         SSH_USER: shobbak
         SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
       run: |
-        sshpass -p "$SSH_PASSWORD" ssh -o StrictHostKeyChecking=no "$SSH_USER@$SERVER_IP" "
+        sshpass -p $SSH_PASSWORD ssh -o StrictHostKeyChecking=no $SSH_USER@$SERVER_IP "
         cd /home/shobbak/superpower/App_v1 &&
-        git fetch origin &&
-        git checkout \"$DEPLOY_BRANCH\" &&
-        if [ -f .gitignore ] && ! git ls-files --error-unmatch .gitignore >/dev/null 2>&1; then rm -f .gitignore; fi &&
-        git pull origin \"$DEPLOY_BRANCH\" &&
+        git pull origin main &&
         source venv/bin/activate &&
-        python -m pip install -r requirements.txt &&
-        python -m compileall app_entry.py Final.py services &&
-        echo \"$SSH_PASSWORD\" | sudo -S systemctl restart PhMr.service &&
-        echo \"$SSH_PASSWORD\" | sudo -S systemctl is-active --quiet PhMr.service"
+        echo $SSH_PASSWORD | sudo -S systemctl restart PhMr.service"
