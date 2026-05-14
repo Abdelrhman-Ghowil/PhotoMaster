@@ -1,19 +1,17 @@
-name: CI
+name: Run Scheduled Streamlit App
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-  workflow_dispatch:
+  schedule:
+    # Runs every 15 minutes
+    - cron: '*/15 * * * *'
 
 jobs:
-  smoke-test:
+  run-script:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -25,7 +23,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run syntax and import checks
+    - name: Run Streamlit app
+      env:
+        SOME_SECRET: ${{ secrets.SOME_SECRET }}
       run: |
-        python -m compileall app_entry.py Final.py services
-        python -c "import app_entry; import services.image_service; import services.excel_service; import services.google_drive_service; print('imports ok')"
+        nohup streamlit run Final.py --server.port 8501 &  # Run Streamlit in the background
+        sleep 10  # Wait for a few seconds to let Streamlit start
+
+    # Optionally, you could add a step here to test the app's response
