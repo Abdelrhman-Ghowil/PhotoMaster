@@ -12,7 +12,30 @@ on:
         type: string
 
 jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run syntax and import checks
+      run: |
+        python -m compileall app_entry.py Final.py services
+        python -c "import app_entry; import services.image_service; import services.excel_service; import services.google_drive_service; print('imports ok')"
+
   deploy:
+    needs: smoke-test
     runs-on: ubuntu-latest
 
     steps:
@@ -45,4 +68,7 @@ jobs:
         if [ -f .gitignore ] && ! git ls-files --error-unmatch .gitignore >/dev/null 2>&1; then rm -f .gitignore; fi &&
         git pull origin \"$DEPLOY_BRANCH\" &&
         source venv/bin/activate &&
-        echo \"$SSH_PASSWORD\" | sudo -S systemctl restart PhMr.service"
+        python -m pip install -r requirements.txt &&
+        python -m compileall app_entry.py Final.py services &&
+        echo \"$SSH_PASSWORD\" | sudo -S systemctl restart PhMr.service &&
+        echo \"$SSH_PASSWORD\" | sudo -S systemctl is-active --quiet PhMr.service"
