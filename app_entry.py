@@ -7,7 +7,30 @@ from io import BytesIO
 import pandas as pd
 import pypdfium2 as pdfium
 import streamlit as st
+import streamlit.elements.image as st_image
 from PIL import Image
+
+
+def _patch_drawable_canvas_image_to_url():
+    if hasattr(st_image, "image_to_url"):
+        return
+
+    try:
+        from streamlit.elements.lib.image_utils import image_to_url
+        from streamlit.elements.lib.layout_utils import create_layout_config
+    except ModuleNotFoundError:
+        return
+
+    def _canvas_image_to_url(image, width, clamp, channels, output_format, image_id):
+        layout_config = create_layout_config(width=width, allow_content_width=True)
+        return image_to_url(image, layout_config, clamp, channels, output_format, image_id)
+
+    st_image.image_to_url = _canvas_image_to_url
+
+
+_patch_drawable_canvas_image_to_url()
+
+from streamlit_drawable_canvas import st_canvas
 
 from services.excel_service import extract_links, rename_images_based_on_sheet
 from services.google_drive_service import authenticate_gdrive, convert_drive_file, get_files_from_folder
