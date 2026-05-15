@@ -1,14 +1,25 @@
 import re
+import os
 from io import BytesIO
+from pathlib import Path
 from zipfile import ZipFile
 
+import numpy as np
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pdf2image import convert_from_bytes
+import torch
+from torch.hub import download_url_to_file
 from transformers import pipeline
 from transformers.modeling_utils import PreTrainedModel
+
+
+OBJECT_ERASER_MODEL_URL = os.environ.get(
+    "OBJECT_ERASER_MODEL_URL",
+    "https://huggingface.co/spaces/aryadytm/remove-photo-object/resolve/main/assets/big-lama.pt",
+)
 
 
 @st.cache_data
@@ -109,6 +120,124 @@ def remove_background(image_content):
         return None
 
 
+def _ceil_modulo(value, modulo):
+    if value % modulo == 0:
+        return value
+    return (value // modulo + 1) * modulo
+
+
+def _pad_chw_to_modulo(array, modulo):
+    channels, height, width = array.shape
+    out_height = _ceil_modulo(height, modulo)
+    out_width = _ceil_modulo(width, modulo)
+    return np.pad(
+        array,
+        ((0, 0), (0, out_height - height), (0, out_width - width)),
+        mode="symmetric",
+    )
+
+
+def _resize_long_side(image, size_limit, resample=Image.BICUBIC):
+    width, height = image.size
+    if max(width, height) <= size_limit:
+        return image
+
+    scale = size_limit / max(width, height)
+    new_size = (max(1, int(width * scale + 0.5)), max(1, int(height * scale + 0.5)))
+    return image.resize(new_size, resample)
+
+
+def _normalize_image(image):
+    array = np.asarray(image)
+    if array.ndim == 2:
+        array = array[:, :, np.newaxis]
+    array = np.transpose(array, (2, 0, 1))
+    return array.astype("float32") / 255.0
+
+
+def _resolve_object_eraser_model_path():
+    model_path = Path(
+        os.environ.get("OBJECT_ERASER_MODEL_PATH", "assets/big-lama.pt")
+    ).expanduser()
+    if not model_path.is_absolute():
+        model_path = Path.cwd() / model_path
+
+    if model_path.exists():
+        return model_path
+
+    try:
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        download_url_to_file(OBJECT_ERASER_MODEL_URL, str(model_path), progress=True)
+    except Exception as exc:
+        st.error(
+            "Object Eraser model is missing and could not be downloaded. "
+            f"Put big-lama.pt at {model_path} or set OBJECT_ERASER_MODEL_PATH. Error: {exc}"
+        )
+        return None
+
+    return model_path if model_path.exists() else None
+
+
+@st.cache_resource
+def get_object_eraser_model():
+    model_path = _resolve_object_eraser_model_path()
+    if model_path is None:
+        return None
+
+    try:
+        model = torch.jit.load(str(model_path), map_location="cpu")
+        model.eval()
+        return model
+    except Exception as exc:
+        st.error(f"Object Eraser model could not be loaded: {exc}")
+        return None
+
+
+def erase_object(image_content, mask):
+    try:
+        original_image = Image.open(BytesIO(image_content)).convert("RGB")
+        mask_image = mask.convert("L") if isinstance(mask, Image.Image) else Image.open(BytesIO(mask)).convert("L")
+    except UnidentifiedImageError:
+        return None
+
+    if mask_image.size != original_image.size:
+        mask_image = mask_image.resize(original_image.size, Image.NEAREST)
+
+    model = get_object_eraser_model()
+    if model is None:
+        return None
+
+    size_limit = int(os.environ.get("OBJECT_ERASER_SIZE_LIMIT", "2000"))
+    work_image = _resize_long_side(original_image, size_limit, Image.BICUBIC)
+    work_mask = mask_image.resize(work_image.size, Image.NEAREST)
+
+    image_array = _pad_chw_to_modulo(_normalize_image(work_image), 8)
+    mask_array = _pad_chw_to_modulo(_normalize_image(work_mask), 8)
+    mask_array = (mask_array > 0).astype("float32")
+
+    image_tensor = torch.from_numpy(image_array).unsqueeze(0)
+    mask_tensor = torch.from_numpy(mask_array).unsqueeze(0)
+
+    try:
+        with torch.no_grad():
+            output = model(image_tensor, mask_tensor)
+    except Exception as exc:
+        st.error(f"Object Eraser failed: {exc}")
+        return None
+
+    width, height = work_image.size
+    result = output[0].permute(1, 2, 0).detach().cpu().numpy()
+    result = result[:height, :width, :]
+    result = np.clip(result * 255, 0, 255).astype("uint8")
+    result_image = Image.fromarray(result).convert("RGB")
+    if result_image.size != original_image.size:
+        result_image = result_image.resize(original_image.size, Image.BICUBIC)
+
+    out = BytesIO()
+    result_image.save(out, format="PNG")
+    return out.getvalue()
+
+
 @st.cache_data
 def combine_with_background(foreground_content, background_content, resize_foreground=False):
     try:
@@ -202,6 +331,25 @@ def fit_image_to_canvas(image, canvas_size=(1024, 1024)):
     y = (canvas_h - new_h) // 2
     canvas.paste(resized, (x, y), resized)
     return canvas
+
+
+def crop_image(image, left_pct=0, right_pct=0, top_pct=0, bottom_pct=0):
+    base = image.convert("RGBA")
+    width, height = base.size
+
+    left_px = int(width * max(0, left_pct) / 100)
+    right_px = int(width * max(0, right_pct) / 100)
+    top_px = int(height * max(0, top_pct) / 100)
+    bottom_px = int(height * max(0, bottom_pct) / 100)
+
+    crop_left = min(left_px, width - 1)
+    crop_top = min(top_px, height - 1)
+    crop_right = max(crop_left + 1, width - right_px)
+    crop_bottom = max(crop_top + 1, height - bottom_px)
+
+    if crop_right <= crop_left or crop_bottom <= crop_top:
+        return base
+    return base.crop((crop_left, crop_top, crop_right, crop_bottom))
 
 
 def convert_and_compress_image(image_content, output_format="png", quality=90):
