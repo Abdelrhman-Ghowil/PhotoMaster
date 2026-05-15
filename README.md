@@ -76,6 +76,26 @@ To use the Google Drive folder feature, you need a service account:
 
 ---
 
+## 🧽 Object Eraser Model
+
+The Object Eraser feature uses a Big LaMa TorchScript model. Keep the model outside GitHub because it is a large binary file.
+
+On the Shobbak server, upload the model to:
+
+```bash
+assets/big-lama.pt
+```
+
+Or set a custom path before starting Streamlit:
+
+```bash
+OBJECT_ERASER_MODEL_PATH=/home/shobbak/superpower/App_v1/assets/big-lama.pt
+```
+
+If the file is missing, the app can try to download it from `OBJECT_ERASER_MODEL_URL`.
+
+---
+
 ## 📋 Excel File Format
 
 When uploading an Excel or CSV file with image links, the sheet must contain these two columns:
