@@ -94,6 +94,13 @@ OBJECT_ERASER_MODEL_PATH=/home/shobbak/superpower/App_v1/assets/big-lama.pt
 
 If the file is missing, the app can try to download it from `OBJECT_ERASER_MODEL_URL`.
 
+Performance knobs:
+
+```bash
+OBJECT_ERASER_SIZE_LIMIT=1280
+TORCH_NUM_THREADS=2
+```
+
 ---
 
 ## 📋 Excel File Format
