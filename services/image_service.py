@@ -21,6 +21,11 @@ OBJECT_ERASER_MODEL_URL = os.environ.get(
     "https://huggingface.co/spaces/aryadytm/remove-photo-object/resolve/main/assets/big-lama.pt",
 )
 
+try:
+    torch.set_num_threads(max(1, int(os.environ.get("TORCH_NUM_THREADS", "2"))))
+except (RuntimeError, ValueError):
+    pass
+
 
 @st.cache_data
 def convert_drive_link(link):
@@ -193,10 +198,29 @@ def get_object_eraser_model():
         return None
 
 
+def _mask_to_png_bytes(mask):
+    mask_image = mask.convert("L") if isinstance(mask, Image.Image) else Image.open(BytesIO(mask)).convert("L")
+    out = BytesIO()
+    mask_image.save(out, format="PNG")
+    return out.getvalue()
+
+
 def erase_object(image_content, mask):
     try:
+        return _erase_object_cached(
+            image_content,
+            _mask_to_png_bytes(mask),
+            int(os.environ.get("OBJECT_ERASER_SIZE_LIMIT", "1280")),
+        )
+    except UnidentifiedImageError:
+        return None
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _erase_object_cached(image_content, mask_content, size_limit):
+    try:
         original_image = Image.open(BytesIO(image_content)).convert("RGB")
-        mask_image = mask.convert("L") if isinstance(mask, Image.Image) else Image.open(BytesIO(mask)).convert("L")
+        mask_image = Image.open(BytesIO(mask_content)).convert("L")
     except UnidentifiedImageError:
         return None
 
@@ -207,7 +231,6 @@ def erase_object(image_content, mask):
     if model is None:
         return None
 
-    size_limit = int(os.environ.get("OBJECT_ERASER_SIZE_LIMIT", "2000"))
     work_image = _resize_long_side(original_image, size_limit, Image.BICUBIC)
     work_mask = mask_image.resize(work_image.size, Image.NEAREST)
 
