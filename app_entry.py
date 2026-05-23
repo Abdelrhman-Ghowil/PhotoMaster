@@ -38,7 +38,13 @@ _patch_drawable_canvas_image_to_url()
 from streamlit_drawable_canvas import st_canvas
 
 from services.excel_service import extract_links, rename_images_based_on_sheet
-from services.google_drive_service import authenticate_gdrive, convert_drive_file, get_files_from_folder
+from services.google_drive_service import (
+    authenticate_gdrive,
+    convert_drive_file,
+    download_drive_file,
+    get_files_from_folder,
+    scan_drive_image_library,
+)
 from services.image_service import (
     combine_with_background,
     convert_and_compress_image,
@@ -80,6 +86,8 @@ ADVANCED_OPTION_PREFIXES = (
     "object_erase_brush_",
 )
 
+DEFAULT_IMAGE_LIBRARY_FOLDER_LINK = "https://drive.google.com/drive/folders/1rOMd51BaqDQ38l3SzygRwWtGH7rGeHtY"
+
 
 def _reset_advanced_options_state():
     keys_to_clear = [
@@ -99,6 +107,182 @@ def _reset_advanced_options_for_index(index):
     erased_key = f"object_erased_image_{index}"
     if erased_key in st.session_state:
         del st.session_state[erased_key]
+
+
+def _extract_drive_folder_id(folder_link):
+    match = re.search(r"/folders/([a-zA-Z0-9_-]+)", folder_link or "")
+    if match:
+        return match.group(1)
+
+    match = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", folder_link or "")
+    if match:
+        return match.group(1)
+
+    stripped = str(folder_link or "").strip()
+    if re.fullmatch(r"[a-zA-Z0-9_-]{20,}", stripped):
+        return stripped
+
+    return None
+
+
+def _dedupe_image_info_names(images_info):
+    counts = defaultdict(int)
+    deduped = []
+    duplicates = 0
+
+    for name, content in images_info:
+        safe_name = str(name or "image").strip() or "image"
+        if "." in safe_name:
+            base, ext = safe_name.rsplit(".", 1)
+            ext = f".{ext}"
+        else:
+            base, ext = safe_name, ""
+
+        key = safe_name.lower()
+        count = counts[key]
+        counts[key] += 1
+        if count:
+            safe_name = f"{base}_{count}{ext}"
+            duplicates += 1
+        deduped.append((safe_name, content))
+
+    return deduped, duplicates
+
+
+def _render_drive_image_library():
+    with st.expander("Google Drive Image Library", expanded=False):
+        st.caption("Search nested Drive folders and add only the selected image to the current batch.")
+        library_link = st.text_input(
+            "Library folder link",
+            value=DEFAULT_IMAGE_LIBRARY_FOLDER_LINK,
+            key="drive_library_link",
+        )
+        folder_id = _extract_drive_folder_id(library_link)
+
+        if st.button("Scan Library", key="drive_library_scan"):
+            if not folder_id:
+                st.error("Enter a valid Google Drive folder link.")
+            else:
+                with st.spinner("Scanning Drive folders..."):
+                    st.session_state["drive_library_scan_result"] = scan_drive_image_library(folder_id)
+
+        scan_result = st.session_state.get("drive_library_scan_result")
+        if not scan_result:
+            return []
+
+        stats = scan_result["stats"]
+        stat_cols = st.columns(4)
+        stat_cols[0].metric("Images", stats.get("images_found", 0))
+        stat_cols[1].metric("Folders", stats.get("folders_scanned", 0))
+        stat_cols[2].metric("Renamed", stats.get("duplicates_renamed", 0))
+        stat_cols[3].metric("Skipped", stats.get("inaccessible_folders", 0))
+
+        for warning in scan_result.get("warnings", [])[:5]:
+            st.warning(warning)
+        if len(scan_result.get("warnings", [])) > 5:
+            st.warning(f"{len(scan_result['warnings']) - 5} more folders were skipped.")
+
+        image_files = [
+            file
+            for file in scan_result["files"]
+            if file.get("mimeType", "").startswith("image/")
+        ]
+        if not image_files:
+            st.info("No image files were found in this library.")
+            return st.session_state.get("drive_library_selected_images", [])
+
+        search_query = st.text_input("Search images", key="drive_library_search").strip().lower()
+        if search_query:
+            image_files = [
+                file
+                for file in image_files
+                if search_query in file["name"].lower() or search_query in file["path"].lower()
+            ]
+        if not image_files:
+            st.info("No images match this search.")
+            return st.session_state.get("drive_library_selected_images", [])
+
+        st.caption(f"Showing {min(len(image_files), 12)} of {len(image_files)} matching images.")
+        gallery_files = image_files[:12]
+
+        gallery_cols = st.columns(4)
+        checked_file_ids = []
+        for index, file in enumerate(gallery_files):
+            with gallery_cols[index % 4]:
+                is_checked = st.checkbox(
+                    file["name"],
+                    key=f"drive_library_checked_{file['id']}",
+                )
+                st.caption(file["path"])
+                if is_checked:
+                    checked_file_ids.append(file["id"])
+
+        checked_files = [file for file in gallery_files if file["id"] in checked_file_ids]
+        if checked_files:
+            st.caption(f"{len(checked_files)} image(s) checked.")
+            if st.button("Preview First Checked Image", key="drive_library_preview_checked"):
+                preview_file = checked_files[0]
+                with st.spinner(f"Loading preview for {preview_file['name']}..."):
+                    try:
+                        st.session_state["drive_library_preview"] = (
+                            preview_file["id"],
+                            download_drive_file(preview_file["id"]),
+                        )
+                    except Exception as exc:
+                        st.error(f"Could not preview {preview_file['name']}: {exc}")
+
+            preview = st.session_state.get("drive_library_preview")
+            preview_file = next((file for file in checked_files if preview and file["id"] == preview[0]), None)
+            if preview_file:
+                st.image(preview[1], caption=preview_file["name"], use_container_width=True)
+
+            if st.button("Add Checked Images", key="drive_library_add_checked"):
+                selected_images = st.session_state.setdefault("drive_library_selected_images", [])
+                selected_file_ids = st.session_state.setdefault("drive_library_selected_file_ids", [])
+                existing_file_ids = set(selected_file_ids)
+                added_count = 0
+                skipped_count = 0
+                for file in checked_files:
+                    if file["id"] in existing_file_ids:
+                        skipped_count += 1
+                        continue
+
+                    preview = st.session_state.get("drive_library_preview")
+                    if preview and preview[0] == file["id"]:
+                        image_content = preview[1]
+                    else:
+                        with st.spinner(f"Downloading {file['name']}..."):
+                            try:
+                                image_content = download_drive_file(file["id"])
+                            except Exception as exc:
+                                st.error(f"Could not download {file['name']}: {exc}")
+                                image_content = None
+                    if image_content:
+                        selected_images.append((file["name"], image_content))
+                        selected_file_ids.append(file["id"])
+                        existing_file_ids.add(file["id"])
+                        added_count += 1
+                selected_images, duplicate_count = _dedupe_image_info_names(selected_images)
+                st.session_state["drive_library_selected_images"] = selected_images
+                st.session_state["drive_library_selected_file_ids"] = selected_file_ids
+                if duplicate_count:
+                    st.info(f"Renamed {duplicate_count} duplicate selected image name.")
+                if added_count:
+                    st.success(f"Added {added_count} image(s) to the current workflow.")
+                elif skipped_count:
+                    st.info("No new images were added because the selected images already exist.")
+                if added_count and skipped_count:
+                    st.info(f"Skipped {skipped_count} image(s) that already exist.")
+
+        selected_images = st.session_state.get("drive_library_selected_images", [])
+        if selected_images:
+            st.write(f"{len(selected_images)} selected image(s) ready in this workflow.")
+            if st.button("Clear Selected Library Images", key="drive_library_clear_selected"):
+                st.session_state["drive_library_selected_images"] = []
+                st.session_state["drive_library_selected_file_ids"] = []
+                st.rerun()
+
+        return st.session_state.get("drive_library_selected_images", [])
 
 
 def _build_object_eraser_mask(canvas_image_data, background_image):
@@ -279,8 +463,11 @@ def run_app():
         accept_multiple_files=True,
     )
     folder_link = st.text_input("Enter Google Drive Link for (**Larger Files**)")
+    selected_library_images = _render_drive_image_library()
 
     images_info = []
+    if selected_library_images:
+        images_info.extend(selected_library_images)
 
     if uploaded_files:
         if len(uploaded_files) == 1 and uploaded_files[0].name.endswith((".xlsx", ".csv")):
@@ -421,6 +608,11 @@ def run_app():
                                 img_byte_arr = BytesIO()
                                 img.save(img_byte_arr, format="PNG")
                                 images_info.append((f"{file_name.rsplit('.', 1)[0]}.png", img_byte_arr.getvalue()))
+
+    if images_info:
+        images_info, duplicate_count = _dedupe_image_info_names(images_info)
+        if duplicate_count:
+            st.info(f"Renamed {duplicate_count} duplicate filename(s) in the current workflow.")
 
     if images_info:
         bg_image = None
