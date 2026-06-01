@@ -59,6 +59,7 @@ from services.image_service import (
     move_image,
     remove_background,
     resize_image,
+    upscale_image,
     zoom_image,
 )
 
@@ -84,6 +85,8 @@ ADVANCED_OPTION_PREFIXES = (
     "crop_bottom_",
     "object_erase_",
     "object_erase_brush_",
+    "upscale_enabled_",
+    "upscale_scale_",
 )
 
 DEFAULT_IMAGE_LIBRARY_FOLDER_LINK = "https://drive.google.com/drive/folders/1rOMd51BaqDQ38l3SzygRwWtGH7rGeHtY"
@@ -666,6 +669,8 @@ def run_app():
                     crop_top = 0
                     crop_bottom = 0
                     per_image_object_erase = False
+                    upscale_enabled = False
+                    upscale_scale = 2
                     move_enabled = False
                     move_x = 0
                     move_y = 0
@@ -710,6 +715,17 @@ def run_app():
                             "Object Eraser",
                             key=f"object_erase_{i}",
                         )
+                        upscale_enabled = st.checkbox(
+                            "Upscale",
+                            key=f"upscale_enabled_{i}",
+                        )
+                        if upscale_enabled:
+                            upscale_scale = st.selectbox(
+                                "Upscale scale",
+                                options=[2, 4],
+                                format_func=lambda value: f"{value}x",
+                                key=f"upscale_scale_{i}",
+                            )
                         move_enabled = st.checkbox("Move", key=f"move_enabled_{i}")
                         if move_enabled:
                             move_x = st.slider(
@@ -862,6 +878,13 @@ def run_app():
                         img_byte_arr = BytesIO()
                         processed_image.save(img_byte_arr, format="PNG")
                         processed_image = img_byte_arr.getvalue()
+
+                    if upscale_enabled and processed_image:
+                        with st.spinner(f"Upscaling {name}..."):
+                            upscaled_image = upscale_image(processed_image, scale=upscale_scale)
+                        if upscaled_image:
+                            processed_image = upscaled_image
+                            ext = "png"
 
                     if processed_image:
                         mime = f"image/{ext}"

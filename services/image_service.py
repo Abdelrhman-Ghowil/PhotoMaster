@@ -11,6 +11,8 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pdf2image import convert_from_bytes
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.hub import download_url_to_file
 from transformers import pipeline
 from transformers.modeling_utils import PreTrainedModel
@@ -19,6 +21,9 @@ from transformers.modeling_utils import PreTrainedModel
 OBJECT_ERASER_MODEL_URL = os.environ.get(
     "OBJECT_ERASER_MODEL_URL",
     "https://huggingface.co/spaces/aryadytm/remove-photo-object/resolve/main/assets/big-lama.pt",
+)
+REALESRGAN_X4PLUS_MODEL_URL = (
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 )
 
 try:
@@ -183,6 +188,29 @@ def _resolve_object_eraser_model_path():
     return model_path if model_path.exists() else None
 
 
+def _resolve_realesrgan_model_path():
+    model_path = Path(
+        os.environ.get("REALESRGAN_MODEL_PATH", "assets/models/RealESRGAN_x4plus.pth")
+    ).expanduser()
+    if not model_path.is_absolute():
+        model_path = Path.cwd() / model_path
+
+    if model_path.exists():
+        return model_path
+
+    try:
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        download_url_to_file(REALESRGAN_X4PLUS_MODEL_URL, str(model_path), progress=True)
+    except Exception as exc:
+        st.error(
+            "Real-ESRGAN model is missing and could not be downloaded. "
+            f"Put RealESRGAN_x4plus.pth at {model_path} or set REALESRGAN_MODEL_PATH. Error: {exc}"
+        )
+        return None
+
+    return model_path if model_path.exists() else None
+
+
 @st.cache_resource
 def get_object_eraser_model():
     model_path = _resolve_object_eraser_model_path()
@@ -195,6 +223,214 @@ def get_object_eraser_model():
         return model
     except Exception as exc:
         st.error(f"Object Eraser model could not be loaded: {exc}")
+        return None
+
+
+class _ResidualDenseBlock(nn.Module):
+    def __init__(self, num_feat=64, num_grow_ch=32):
+        super().__init__()
+        self.conv1 = nn.Conv2d(num_feat, num_grow_ch, 3, 1, 1)
+        self.conv2 = nn.Conv2d(num_feat + num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv3 = nn.Conv2d(num_feat + 2 * num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv4 = nn.Conv2d(num_feat + 3 * num_grow_ch, num_grow_ch, 3, 1, 1)
+        self.conv5 = nn.Conv2d(num_feat + 4 * num_grow_ch, num_feat, 3, 1, 1)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        x1 = self.lrelu(self.conv1(x))
+        x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
+        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
+        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
+        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
+        return x5 * 0.2 + x
+
+
+class _RRDB(nn.Module):
+    def __init__(self, num_feat=64, num_grow_ch=32):
+        super().__init__()
+        self.rdb1 = _ResidualDenseBlock(num_feat, num_grow_ch)
+        self.rdb2 = _ResidualDenseBlock(num_feat, num_grow_ch)
+        self.rdb3 = _ResidualDenseBlock(num_feat, num_grow_ch)
+
+    def forward(self, x):
+        out = self.rdb1(x)
+        out = self.rdb2(out)
+        out = self.rdb3(out)
+        return out * 0.2 + x
+
+
+class _RRDBNet(nn.Module):
+    def __init__(self, num_block=23, num_feat=64, num_grow_ch=32):
+        super().__init__()
+        self.conv_first = nn.Conv2d(3, num_feat, 3, 1, 1)
+        self.body = nn.Sequential(*[_RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
+        self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_last = nn.Conv2d(num_feat, 3, 3, 1, 1)
+        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+
+    def forward(self, x):
+        feat = self.conv_first(x)
+        body_feat = self.conv_body(self.body(feat))
+        feat = feat + body_feat
+        feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode="nearest")))
+        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest")))
+        out = self.conv_last(self.lrelu(self.conv_hr(feat)))
+        return out
+
+
+class _LocalRealESRGANUpsampler:
+    def __init__(self, model_path, tile=256, tile_pad=10):
+        self.scale = 4
+        self.tile = tile
+        self.tile_pad = tile_pad
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = _RRDBNet().to(self.device)
+        try:
+            state = torch.load(str(model_path), map_location=self.device, weights_only=True)
+        except TypeError:
+            state = torch.load(str(model_path), map_location=self.device)
+        state_dict = state.get("params_ema") or state.get("params") or state
+        self.model.load_state_dict(state_dict, strict=True)
+        self.model.eval()
+
+    def _process_tensor(self, img):
+        _, _, height, width = img.shape
+        if not self.tile:
+            return self.model(img)
+
+        output = img.new_zeros((1, 3, height * self.scale, width * self.scale))
+        for y in range(0, height, self.tile):
+            for x in range(0, width, self.tile):
+                y1 = min(y + self.tile, height)
+                x1 = min(x + self.tile, width)
+                y0_pad = max(y - self.tile_pad, 0)
+                x0_pad = max(x - self.tile_pad, 0)
+                y1_pad = min(y1 + self.tile_pad, height)
+                x1_pad = min(x1 + self.tile_pad, width)
+
+                input_tile = img[:, :, y0_pad:y1_pad, x0_pad:x1_pad]
+                output_tile = self.model(input_tile)
+
+                out_y0 = y * self.scale
+                out_x0 = x * self.scale
+                out_y1 = y1 * self.scale
+                out_x1 = x1 * self.scale
+                tile_y0 = (y - y0_pad) * self.scale
+                tile_x0 = (x - x0_pad) * self.scale
+                tile_y1 = tile_y0 + (y1 - y) * self.scale
+                tile_x1 = tile_x0 + (x1 - x) * self.scale
+                output[:, :, out_y0:out_y1, out_x0:out_x1] = output_tile[
+                    :, :, tile_y0:tile_y1, tile_x0:tile_x1
+                ]
+        return output
+
+    def enhance(self, image, outscale=2):
+        outscale = int(outscale)
+        has_alpha = image.ndim == 3 and image.shape[2] == 4
+        if image.ndim == 2:
+            image = np.repeat(image[:, :, np.newaxis], 3, axis=2)
+        rgb_image = image[:, :, :3] if has_alpha else image
+        alpha = image[:, :, 3] if has_alpha else None
+
+        img = rgb_image.astype(np.float32) / 255.0
+        img = torch.from_numpy(np.transpose(img, (2, 0, 1))).float().unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            output = self._process_tensor(img)
+
+        output = output.squeeze(0).float().cpu().clamp_(0, 1).numpy()
+        output = np.transpose(output, (1, 2, 0))
+        output = (output * 255.0).round().astype(np.uint8)
+
+        if outscale != self.scale:
+            output_size = (
+                max(1, int(output.shape[1] * outscale / self.scale)),
+                max(1, int(output.shape[0] * outscale / self.scale)),
+            )
+            output = np.asarray(Image.fromarray(output).resize(output_size, Image.BICUBIC))
+
+        if alpha is not None:
+            alpha = np.asarray(
+                Image.fromarray(alpha).resize((output.shape[1], output.shape[0]), Image.BICUBIC)
+            )
+            output = np.dstack((output, alpha))
+
+        return output, None
+
+
+@st.cache_resource
+def get_realesrgan_upsampler():
+    model_path = _resolve_realesrgan_model_path()
+    if model_path is None:
+        return None
+
+    try:
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+        from realesrgan import RealESRGANer
+    except Exception:
+        try:
+            return _LocalRealESRGANUpsampler(model_path, tile=256, tile_pad=10)
+        except Exception as exc:
+            st.error(f"Real-ESRGAN upscaler could not be loaded: {exc}")
+            return None
+
+    try:
+        model = RRDBNet(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_block=23,
+            num_grow_ch=32,
+            scale=4,
+        )
+        use_cuda = torch.cuda.is_available()
+        return RealESRGANer(
+            scale=4,
+            model_path=str(model_path),
+            model=model,
+            tile=256,
+            tile_pad=10,
+            pre_pad=0,
+            half=use_cuda,
+            gpu_id=0 if use_cuda else None,
+        )
+    except Exception as exc:
+        st.error(f"Real-ESRGAN upscaler could not be loaded: {exc}")
+        return None
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def upscale_image(image_content, scale=2):
+    upsampler = get_realesrgan_upsampler()
+    if upsampler is None:
+        return None
+
+    try:
+        scale = int(scale)
+        if scale not in (2, 4):
+            scale = 2
+        input_image = Image.open(BytesIO(image_content))
+        if input_image.mode == "RGBA":
+            image = np.asarray(input_image)
+        else:
+            image = np.asarray(input_image.convert("RGB"))
+
+        with torch.no_grad():
+            output, _ = upsampler.enhance(image, outscale=scale)
+
+        out = BytesIO()
+        Image.fromarray(output).save(out, format="PNG")
+        return out.getvalue()
+    except UnidentifiedImageError:
+        st.error("Real-ESRGAN could not read this image.")
+        return None
+    except RuntimeError as exc:
+        st.error(f"Real-ESRGAN upscale failed. Try a smaller image or 2x scale. Error: {exc}")
+        return None
+    except Exception as exc:
+        st.error(f"Real-ESRGAN upscale failed: {exc}")
         return None
 
 
