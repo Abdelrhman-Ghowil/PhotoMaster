@@ -1,5 +1,8 @@
 torch
 torchvision
+# Optional Real-ESRGAN package path; this can fail on Python versions unsupported by BasicSR.
+# basicsr
+# realesrgan
 pillow
 numpy>=1.26
 scikit-image
