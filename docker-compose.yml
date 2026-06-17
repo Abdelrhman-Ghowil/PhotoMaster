@@ -1,0 +1,53 @@
+x-photomaster-environment: &photomaster-environment
+  GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/run/secrets/google_credentials}
+  OBJECT_ERASER_MODEL_PATH: ${OBJECT_ERASER_MODEL_PATH:-/app/assets/big-lama.pt}
+  REALESRGAN_MODEL_PATH: ${REALESRGAN_MODEL_PATH:-/app/assets/models/RealESRGAN_x4plus.pth}
+  OBJECT_ERASER_MODEL_URL: ${OBJECT_ERASER_MODEL_URL:-https://huggingface.co/spaces/aryadytm/remove-photo-object/resolve/main/assets/big-lama.pt}
+  HF_HOME: ${HF_HOME:-/app/.cache/huggingface}
+  TRANSFORMERS_CACHE: ${TRANSFORMERS_CACHE:-/app/.cache/huggingface}
+  TORCH_HOME: ${TORCH_HOME:-/app/.cache/torch}
+  OBJECT_ERASER_SIZE_LIMIT: ${OBJECT_ERASER_SIZE_LIMIT:-1280}
+  TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-2}
+
+services:
+  photomaster-cpu:
+    build:
+      context: .
+      target: cpu
+    image: photomaster:cpu
+    container_name: photomaster-cpu
+    environment: *photomaster-environment
+    ports:
+      - "${PHOTOMASTER_PORT:-8501}:8501"
+    volumes:
+      - ./assets:/app/assets
+      - photomaster-hf-cache:/app/.cache/huggingface
+      - photomaster-torch-cache:/app/.cache/torch
+      - photomaster-streamlit-cache:/app/.streamlit
+      - ${GOOGLE_CREDENTIALS_FILE:-./credentials.json}:/run/secrets/google_credentials:ro
+    restart: unless-stopped
+
+  photomaster-gpu:
+    profiles:
+      - gpu
+    build:
+      context: .
+      target: gpu
+    image: photomaster:gpu
+    container_name: photomaster-gpu
+    environment: *photomaster-environment
+    ports:
+      - "${PHOTOMASTER_PORT:-8501}:8501"
+    volumes:
+      - ./assets:/app/assets
+      - photomaster-hf-cache:/app/.cache/huggingface
+      - photomaster-torch-cache:/app/.cache/torch
+      - photomaster-streamlit-cache:/app/.streamlit
+      - ${GOOGLE_CREDENTIALS_FILE:-./credentials.json}:/run/secrets/google_credentials:ro
+    gpus: all
+    restart: unless-stopped
+
+volumes:
+  photomaster-hf-cache:
+  photomaster-torch-cache:
+  photomaster-streamlit-cache:

@@ -1,5 +1,6 @@
 from collections import defaultdict
 from io import BytesIO
+import os
 
 import streamlit as st
 from googleapiclient.errors import HttpError
@@ -13,7 +14,8 @@ FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 
 @st.cache_resource
 def authenticate_gdrive():
-    credentials = service_account.Credentials.from_service_account_file("credentials.json")
+    credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
+    credentials = service_account.Credentials.from_service_account_file(credentials_path)
     return build("drive", "v3", credentials=credentials)
 
 
