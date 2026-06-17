@@ -1,4 +1,12 @@
 credentials.json
+.env
+.env.*
+!.env.example
+secrets/
 assets/big-lama.pt
+assets/models/*.pt
+assets/models/*.pth
 __pycache__/
 *.pyc
+temp/
+tmp/

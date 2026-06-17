@@ -63,13 +63,72 @@ Then open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ---
 
+## 🐳 Docker Deployment
+
+PhotoMaster is ready for Docker-based handoff and deployment. The Docker setup keeps large AI model files and secrets outside the image, so Ninja DevOps can mount persistent model storage and rotate credentials without rebuilding.
+
+### Build Images
+
+```bash
+# CPU image, default deployment target
+docker build --target cpu -t photomaster:cpu .
+
+# NVIDIA GPU image, for hosts with NVIDIA Container Toolkit
+docker build --target gpu -t photomaster:gpu .
+```
+
+### Run With Docker Compose
+
+```bash
+# Optional: create local deployment settings
+cp .env.example .env
+
+# Start the CPU service
+docker compose up --build photomaster-cpu
+```
+
+Open [http://localhost:8501](http://localhost:8501).
+
+For GPU deployments:
+
+```bash
+docker compose --profile gpu up --build photomaster-gpu
+```
+
+### Runtime Files And Secrets
+
+- Mount or provide `assets/big-lama.pt` at `/app/assets/big-lama.pt`.
+- Mount or provide `assets/models/RealESRGAN_x4plus.pth` at `/app/assets/models/RealESRGAN_x4plus.pth`.
+- Provide the Google Drive service-account JSON outside Git and set `GOOGLE_CREDENTIALS_FILE` in `.env` if it is not `./credentials.json`.
+- The container reads Google credentials from `GOOGLE_APPLICATION_CREDENTIALS`, defaulting to `/run/secrets/google_credentials`.
+- Hugging Face and Torch caches are persisted through Docker volumes so model downloads are not repeated on every restart.
+
+The app can still start without Google credentials; only Google Drive features require the service-account file. If model files are missing, the app will try to download supported models into the mounted `/app/assets` path or configured cache volumes.
+
+### Production Notes
+
+- Keep model storage persistent across deploys; first-run model downloads can be large and slow.
+- Allocate enough memory for PyTorch, Transformers, image processing, and PDF conversion workloads.
+- CPU is the default runtime. For GPU deployments, install and enable NVIDIA Container Toolkit on the host before using the `gpu` compose profile.
+- The container healthcheck probes Streamlit at `/_stcore/health`.
+
+### Ninja DevOps Handoff Checklist
+
+- Provide Google service-account JSON outside Git.
+- Preload or allow download of `assets/big-lama.pt`.
+- Ensure `assets/models/RealESRGAN_x4plus.pth` is mounted or downloadable.
+- Enable NVIDIA Container Toolkit before running the GPU profile.
+- Confirm `http://localhost:8501` responds after deployment.
+
+---
+
 ## 🔑 Google Drive Integration
 
 To use the Google Drive folder feature, you need a service account:
 
 1. Create a service account in [Google Cloud Console](https://console.cloud.google.com/)
 2. Enable the **Google Drive API**
-3. Download the JSON key and save it as `credentials.json` in the project root
+3. Download the JSON key and save it as `credentials.json` in the project root, or set `GOOGLE_APPLICATION_CREDENTIALS` to a custom path
 4. Share your Drive folder with the service account email
 
 > ⚠️ **Never commit `credentials.json` to version control.** It is already listed in `.gitignore`.
@@ -122,6 +181,9 @@ When uploading an Excel or CSV file with image links, the sheet must contain the
 
 ```
 PhotoMaster/
+├── Dockerfile          # CPU/GPU container build targets
+├── docker-compose.yml  # Local and production compose example
+├── .env.example        # Deployment environment template
 ├── Final.py            # Main Streamlit application
 ├── Bg.png              # Default background image
 ├── requirements.txt    # Python dependencies
