@@ -1,0 +1,50 @@
+name: Docker Cloud Test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image_target:
+        description: Dockerfile target to test
+        required: true
+        default: cpu
+        type: choice
+        options:
+          - cpu
+          - gpu
+      push_test_image:
+        description: Push a temporary test image to Docker Hub
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  docker-cloud-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PAT }}
+
+      - name: Set up Docker Buildx Cloud
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: cloud
+          endpoint: ${{ vars.DOCKER_USER }}/ghowil
+
+      - name: Build with Docker Build Cloud
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ${{ github.event.inputs.image_target || 'cpu' }}
+          tags: ${{ vars.DOCKER_USER }}/photomaster:cloud-test
+          outputs: ${{ github.event.inputs.push_test_image == 'true' && 'type=registry' || 'type=cacheonly' }}
